@@ -3404,6 +3404,98 @@ class CameraReader(threading.Thread):
         return f"{type(exc).__name__}: {exc}"
 
 
+
+# ----------------------------------------------------------------------
+# PEMINDAI BARCODE ANDROID (Google Code Scanner / ML Kit)
+# Tanpa OpenCV/numpy/pyzbar. Google Play services yang membuka kamera dan
+# mendeteksi barcode; aplikasi hanya menerima teks hasilnya. Tidak butuh
+# izin CAMERA karena kamera dibuka oleh pemindai Google, bukan aplikasi ini.
+# ----------------------------------------------------------------------
+HAS_GMS_SCANNER = False
+if ANDROID:
+    try:
+        from jnius import PythonJavaClass, java_method
+
+        class _ScanSuccess(PythonJavaClass):
+            __javainterfaces__ = ['com/google/android/gms/tasks/OnSuccessListener']
+            __javacontext__ = 'app'
+
+            def __init__(self, cb):
+                super().__init__()
+                self.cb = cb
+
+            @java_method('(Ljava/lang/Object;)V')
+            def onSuccess(self, result):
+                self.cb(result)
+
+        class _ScanFailure(PythonJavaClass):
+            __javainterfaces__ = ['com/google/android/gms/tasks/OnFailureListener']
+            __javacontext__ = 'app'
+
+            def __init__(self, cb):
+                super().__init__()
+                self.cb = cb
+
+            @java_method('(Ljava/lang/Exception;)V')
+            def onFailure(self, exc):
+                self.cb(exc)
+
+        class _ScanCancel(PythonJavaClass):
+            __javainterfaces__ = ['com/google/android/gms/tasks/OnCanceledListener']
+            __javacontext__ = 'app'
+
+            def __init__(self, cb):
+                super().__init__()
+                self.cb = cb
+
+            @java_method('()V')
+            def onCanceled(self):
+                self.cb()
+
+        HAS_GMS_SCANNER = True
+    except Exception as e:  # noqa: BLE001
+        print("Pemindai Google tidak tersedia:", e)
+
+
+def start_google_scan(on_code, on_cancel, on_error):
+    """Buka pemindai Google. Semua callback dijalankan di thread Kivy.
+    Mengembalikan daftar listener yang HARUS disimpan pemanggil supaya
+    tidak dibersihkan garbage collector sebelum hasil datang."""
+    from jnius import autoclass, cast
+
+    def to_kivy(fn, *args):
+        Clock.schedule_once(lambda dt: fn(*args), 0)
+
+    def _ok(result):
+        try:
+            barcode = cast('com.google.mlkit.vision.barcode.common.Barcode', result)
+            value = barcode.getRawValue()
+            value = str(value).strip() if value is not None else ''
+        except Exception as e:  # noqa: BLE001
+            to_kivy(on_error, f"{type(e).__name__}: {e}")
+            return
+        if value:
+            to_kivy(on_code, value)
+        else:
+            to_kivy(on_error, "Barcode terbaca tetapi isinya kosong.")
+
+    def _fail(exc):
+        to_kivy(on_error, str(exc))
+
+    def _cancel():
+        to_kivy(on_cancel)
+
+    from android import mActivity
+    Scanning = autoclass('com.google.mlkit.vision.codescanner.GmsBarcodeScanning')
+    scanner = Scanning.getClient(mActivity)
+    listeners = [_ScanSuccess(_ok), _ScanFailure(_fail), _ScanCancel(_cancel)]
+    task = scanner.startScan()
+    task.addOnSuccessListener(listeners[0])
+    task.addOnFailureListener(listeners[1])
+    task.addOnCanceledListener(listeners[2])
+    return listeners
+
+
 class ScannerScreen(AppScreen):
     reader = None
     _texture = None
@@ -3418,6 +3510,10 @@ class ScannerScreen(AppScreen):
             pass
 
     def on_enter(self):
+        if ANDROID:
+            self._enter_android()
+            return
+
         if not HAS_BARCODE:
             Popup(title='Error', content=Label(text='Library OpenCV/Pyzbar/Numpy belum terinstall!'), size_hint=(0.8, 0.25)).open()
             Clock.schedule_once(lambda dt: self.cancel_scan(), 0)
@@ -3437,6 +3533,44 @@ class ScannerScreen(AppScreen):
         self.reader = CameraReader(self._source)
         self.reader.start()
         Clock.schedule_interval(self.update_frame, 1.0 / 30.0)
+
+    # ----- Jalur Android: pemindai Google -----
+    _gms_listeners = None
+
+    def _enter_android(self):
+        self._active = True
+        self._set_status('Membuka pemindai...')
+        if not HAS_GMS_SCANNER:
+            self._gms_error('Modul Android (pyjnius) tidak lengkap.')
+            return
+        try:
+            self._gms_listeners = start_google_scan(
+                self._gms_code, self._gms_cancel, self._gms_error)
+        except Exception as e:  # noqa: BLE001
+            self._gms_error(f"{type(e).__name__}: {e}")
+
+    def _gms_code(self, code):
+        if not self._active:
+            return
+        self._active = False
+        self._gms_listeners = None
+        self.handle_scanned_barcode(code)
+
+    def _gms_cancel(self):
+        if not self._active:
+            return
+        self._active = False
+        self._gms_listeners = None
+        self.cancel_scan()
+
+    def _gms_error(self, message):
+        self._active = False
+        self._gms_listeners = None
+        show_popup('Scan Gagal',
+                   f"{message}\n\nPastikan Google Play services aktif dan "
+                   "terbarui, atau pakai alat scan USB/Bluetooth, atau ketik "
+                   "barcode secara manual.", 'error')
+        self.cancel_scan()
 
     def update_frame(self, dt):
         reader = self.reader
@@ -3944,4 +4078,4 @@ class POSNaufalApp(App):
 
 
 if __name__ == '__main__':
-    POSNaufalApp().run()
+    POSNaufalApp().run()    
