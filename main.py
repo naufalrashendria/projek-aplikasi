@@ -9,7 +9,6 @@ import threading
 import subprocess
 import unicodedata
 import requests
-from urllib.parse import urlparse, urlunparse
 import datetime
 import firestore_rest as fs
 
@@ -247,7 +246,7 @@ class ReceiptBuilder:
             return [left + ' ' * gap + right]
         return [left, right.rjust(self.cols)]
 
-    def lines(self, kasir_name, now_dt, items, total):
+    def lines(self, kasir_name, now_dt, items, total, bayar=None, kembalian=None):
         """Kembalikan list (align, bold, teks). align: 'c' tengah, 'l' kiri."""
         rule = '-' * self.cols
         out = []
@@ -272,20 +271,25 @@ class ReceiptBuilder:
         out.append(('l', False, rule))
         for ln in self._two_col("TOTAL", f"Rp {rupiah(total)}"):
             out.append(('l', True, ln))
+        if bayar is not None:
+            for ln in self._two_col("BAYAR", f"Rp {rupiah(bayar)}"):
+                out.append(('l', False, ln))
+            for ln in self._two_col("KEMBALI", f"Rp {rupiah(kembalian or 0)}"):
+                out.append(('l', True, ln))
         out.append(('l', False, rule))
         out.append(('c', False, 'Terima Kasih!'))
         return out
 
-    def as_text(self, kasir_name, now_dt, items, total):
+    def as_text(self, kasir_name, now_dt, items, total, bayar=None, kembalian=None):
         rows = []
-        for align, _bold, text in self.lines(kasir_name, now_dt, items, total):
+        for align, _bold, text in self.lines(kasir_name, now_dt, items, total, bayar, kembalian):
             rows.append(text.center(self.cols).rstrip() if align == 'c' else text)
         return '\n'.join(rows)
 
-    def as_escpos(self, kasir_name, now_dt, items, total):
+    def as_escpos(self, kasir_name, now_dt, items, total, bayar=None, kembalian=None):
         ESC, GS = self.ESC, self.GS
         buf = bytearray(ESC + b'@')  # init printer
-        for align, bold, text in self.lines(kasir_name, now_dt, items, total):
+        for align, bold, text in self.lines(kasir_name, now_dt, items, total, bayar, kembalian):
             buf += ESC + b'a' + (b'\x01' if align == 'c' else b'\x00')
             buf += ESC + b'E' + (b'\x01' if bold else b'\x00')
             buf += text.encode('ascii', 'ignore') + b'\n'
@@ -1388,6 +1392,33 @@ ScreenManager:
                 width: dp(72)
                 on_press: root.confirm_reset_report()
 
+        BoxLayout:
+            size_hint_y: None
+            height: dp(52)
+            padding: [dp(14), dp(8), dp(14), dp(2)]
+            spacing: dp(8)
+            RoundedButton:
+                text: 'Ringkasan'
+                font_size: '12sp'
+                bg_color: C_PRIMARY if root.period == 'all' else C_SURFACE
+                bg_color_down: C_PRIMARY_DARK if root.period == 'all' else C_SURFACE2
+                color: [1, 1, 1, 1] if root.period == 'all' else C_MUTED
+                on_press: root.set_period('all')
+            RoundedButton:
+                text: 'Mingguan'
+                font_size: '12sp'
+                bg_color: C_PRIMARY if root.period == 'week' else C_SURFACE
+                bg_color_down: C_PRIMARY_DARK if root.period == 'week' else C_SURFACE2
+                color: [1, 1, 1, 1] if root.period == 'week' else C_MUTED
+                on_press: root.set_period('week')
+            RoundedButton:
+                text: 'Bulanan'
+                font_size: '12sp'
+                bg_color: C_PRIMARY if root.period == 'month' else C_SURFACE
+                bg_color_down: C_PRIMARY_DARK if root.period == 'month' else C_SURFACE2
+                color: [1, 1, 1, 1] if root.period == 'month' else C_MUTED
+                on_press: root.set_period('month')
+
         ScrollView:
             do_scroll_x: False
             BoxLayout:
@@ -1469,25 +1500,6 @@ ScreenManager:
                         size_hint_y: None
                         height: dp(44)
                         on_press: root.save_kasir_name()
-
-                # --- Kamera scanner ---
-                SectionCard:
-                    SectionTitle:
-                        text: 'Kamera Scanner'
-                        color: C_PRIMARY
-                    HintLabel:
-                        text: 'Pakai kamera HP lewat WiFi (mis. aplikasi IP Webcam) sebagai pemindai barcode. Kosongkan untuk memakai kamera bawaan.'
-                    FieldLabel:
-                        text: 'URL IP Camera (opsional)'
-                    ModernTextInput:
-                        id: ip_camera_input
-                        text: app.ip_camera_url
-                        hint_text: 'http://192.168.1.X:8080/video'
-                    PrimaryButton:
-                        text: 'Simpan URL Kamera'
-                        size_hint_y: None
-                        height: dp(44)
-                        on_press: root.save_ip_camera_url()
 
                 # --- Alat scan barcode fisik ---
                 SectionCard:
@@ -1944,7 +1956,7 @@ class SettingsScreen(AppScreen):
         show_popup('Sukses', 'Info struk berhasil disimpan!', 'ok')
 
     # ------------------------------------------------------------------
-    # AKUN & KAMERA
+    # AKUN
     # ------------------------------------------------------------------
     def save_kasir_name(self):
         app = App.get_running_app()
@@ -1955,16 +1967,6 @@ class SettingsScreen(AppScreen):
         app.kasir_name = new_name
         app.persist_kasir_name()
         show_popup('Sukses', 'Nama kasir berhasil diperbarui!', 'ok')
-
-    def save_ip_camera_url(self):
-        app = App.get_running_app()
-        # Rapikan input: tambah http:// dan /video bila belum ada
-        url = normalize_camera_url(self.ids.ip_camera_input.text)
-        app.ip_camera_url = url
-        self.ids.ip_camera_input.text = url
-        app.save_camera_settings()
-        msg = f"URL IP Camera disimpan:\n{url}" if url else "URL IP Camera dikosongkan.\n(Memakai kamera bawaan)"
-        show_popup('Sukses', msg, 'ok')
 
     def change_password(self):
         app = App.get_running_app()
@@ -2210,9 +2212,14 @@ class StockError(Exception):
     """Stok tidak cukup / produk sudah dihapus saat checkout."""
 
 
-def checkout_transaction(cart, user_uid, kasir_nama, kasir_email):
+class PaymentError(StockError):
+    """Uang yang dibayar kurang dari total belanja."""
+
+
+def checkout_transaction(cart, user_uid, kasir_nama, kasir_email, bayar=None):
     """Cek stok + kurangi stok + simpan transaksi dalam SATU transaksi Firestore (REST).
-    Kalau ada yang gagal di tengah jalan, tidak ada stok yang "nyangkut" terpotong."""
+    Kalau ada yang gagal di tengah jalan, tidak ada stok yang "nyangkut" terpotong.
+    bayar = uang yang diterima dari pembeli; kembalian dihitung & disimpan bersama transaksi."""
 
     def body(tx):
         snaps = [tx.get("products", item['id']) for item in cart]  # semua READ dulu
@@ -2227,16 +2234,23 @@ def checkout_transaction(cart, user_uid, kasir_nama, kasir_email):
             new_stocks.append(current - item['qty'])
             total += item['harga'] * item['qty']
 
+        if bayar is not None and bayar < total:
+            raise PaymentError(f"Uang yang dibayar kurang.\nTotal Rp {rupiah(total)}, dibayar Rp {rupiah(bayar)}.")
+
         for item, new_stock in zip(cart, new_stocks):  # baru WRITE
             tx.update("products", item['id'], {'stok': new_stock})
 
-        tx.set("transactions", tx.new_id(), {
+        doc = {
             'users_id': user_uid,
             'kasir_nama': kasir_nama,
             'kasir_email': kasir_email,
             'total': total,
             'items': cart,
-        }, server_timestamps=['timestamp'])
+        }
+        if bayar is not None:
+            doc['bayar'] = int(bayar)
+            doc['kembalian'] = int(bayar) - total
+        tx.set("transactions", tx.new_id(), doc, server_timestamps=['timestamp'])
         return total
 
     return fs.run_transaction(body)
@@ -2348,6 +2362,89 @@ class CartScreen(AppScreen):
                   size_hint=(0.85, 0.28)).open()
             return
 
+        total = sum(int(item['harga']) * int(item['qty']) for item in app.cart)
+        self.open_payment_dialog(total)
+
+    def open_payment_dialog(self, total):
+        """Dialog input uang yang dibayar pembeli + kembalian yang dihitung langsung."""
+        content = BoxLayout(orientation='vertical', padding=dp(14), spacing=dp(10))
+
+        row_total = BoxLayout(size_hint_y=None, height=dp(30))
+        row_total.add_widget(Factory.LeftLabel(text='Total Belanja', color=CLR_MUTED))
+        row_total.add_widget(Factory.RightLabel(text=f"Rp {rupiah(total)}", bold=True,
+                                                color=CLR_SUCCESS, font_size='16sp'))
+        content.add_widget(row_total)
+
+        content.add_widget(Factory.FieldLabel(text='Uang yang dibayar (Rp)'))
+        txt_bayar = Factory.ModernTextInput(hint_text='Masukkan uang pembayaran', input_filter='int',
+                                            multiline=False, size_hint_y=None, height=dp(46))
+        content.add_widget(txt_bayar)
+
+        # Tombol nominal cepat: uang pas + pembulatan ke atas (10rb / 50rb / 100rb)
+        quick = [total]
+        for step in (10000, 50000, 100000):
+            v = -(-total // step) * step
+            if v not in quick:
+                quick.append(v)
+        quick_row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(6))
+        for v in quick[:4]:
+            b = Factory.SecondaryButton(text='Uang Pas' if v == total else rupiah(v), font_size='11sp')
+            b.bind(on_press=lambda inst, val=v: setattr(txt_bayar, 'text', str(val)))
+            quick_row.add_widget(b)
+        content.add_widget(quick_row)
+
+        row_kembali = BoxLayout(size_hint_y=None, height=dp(30))
+        row_kembali.add_widget(Factory.LeftLabel(text='Kembalian', color=CLR_MUTED))
+        lbl_kembali = Factory.RightLabel(text='Rp 0', bold=True, font_size='16sp', color=CLR_MUTED)
+        row_kembali.add_widget(lbl_kembali)
+        content.add_widget(row_kembali)
+
+        def get_bayar():
+            t = txt_bayar.text.strip()
+            return int(t) if t else 0
+
+        def update_kembalian(*_):
+            bayar = get_bayar()
+            if bayar <= 0:
+                lbl_kembali.text, lbl_kembali.color = 'Rp 0', CLR_MUTED
+            elif bayar >= total:
+                lbl_kembali.text, lbl_kembali.color = f"Rp {rupiah(bayar - total)}", CLR_SUCCESS
+            else:
+                lbl_kembali.text, lbl_kembali.color = f"Kurang Rp {rupiah(total - bayar)}", CLR_DANGER
+
+        txt_bayar.bind(text=update_kembalian)
+
+        btn_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(10))
+        btn_cancel = Factory.SecondaryButton(text='Batal')
+        btn_pay = Factory.SuccessButton(text='Bayar')
+        btn_row.add_widget(btn_cancel)
+        btn_row.add_widget(btn_pay)
+        content.add_widget(btn_row)
+
+        popup = Popup(title='Pembayaran', content=content, size_hint=(0.9, None), height=dp(370),
+                      pos_hint={'center_x': 0.5, 'top': 0.95})
+
+        def do_pay(*_):
+            bayar = get_bayar()
+            if not txt_bayar.text.strip() or bayar < total:
+                show_popup('Uang Kurang',
+                           f"Uang yang dibayar harus sama dengan atau lebih dari\nRp {rupiah(total)}.", 'warn')
+                return
+            popup.dismiss()
+            self._run_checkout(bayar)
+
+        btn_cancel.bind(on_press=popup.dismiss)
+        btn_pay.bind(on_press=do_pay)
+        txt_bayar.bind(on_text_validate=do_pay)
+        popup.open()
+        Clock.schedule_once(lambda dt: setattr(txt_bayar, 'focus', True), 0.2)
+
+    def _run_checkout(self, bayar):
+        app = App.get_running_app()
+        app.cart = [item for item in app.cart if item['qty'] > 0]
+        if not app.cart:
+            return
+
         cart_snapshot = [dict(item) for item in app.cart]
 
         # Kunci tombol checkout + kasih tahu kasir sedang diproses, supaya:
@@ -2369,7 +2466,7 @@ class CartScreen(AppScreen):
             # Cek stok + kurangi stok + simpan transaksi dalam SATU transaksi atomik:
             # kalau ada yang gagal di tengah jalan, tidak ada stok yang "nyangkut" terpotong.
             return checkout_transaction(
-                cart_snapshot, app.user_uid, app.kasir_name, app.user_email
+                cart_snapshot, app.user_uid, app.kasir_name, app.user_email, bayar
             )
 
         def done(total_bayar, error):
@@ -2387,25 +2484,26 @@ class CartScreen(AppScreen):
                 return
 
             now_dt = datetime.datetime.now()
+            kembalian = bayar - total_bayar
             pdf_path = None
             try:
-                pdf_path = self.generate_pdf_receipt(total_bayar, cart_snapshot, now_dt)
+                pdf_path = self.generate_pdf_receipt(total_bayar, cart_snapshot, now_dt, bayar, kembalian)
             except Exception as e:
                 print("Gagal membuat PDF struk:", e)
 
             app.apply_sale_to_cache(cart_snapshot)  # stok di katalog langsung ikut turun
             app.cart = []
             self.update_cart_ui()
-            self.show_onscreen_receipt(total_bayar, cart_snapshot, now_dt, pdf_path)
+            self.show_onscreen_receipt(total_bayar, cart_snapshot, now_dt, pdf_path, bayar, kembalian)
 
         run_in_thread(work, done)
 
-    def show_onscreen_receipt(self, total, items, now_dt, pdf_path):
+    def show_onscreen_receipt(self, total, items, now_dt, pdf_path, bayar=None, kembalian=None):
         app = App.get_running_app()
         builder = app.make_receipt_builder()
         content = BoxLayout(orientation='vertical', padding=dp(14), spacing=dp(12))
 
-        receipt_text = builder.as_text(app.kasir_name, now_dt, items, total)
+        receipt_text = builder.as_text(app.kasir_name, now_dt, items, total, bayar, kembalian)
         if pdf_path:
             receipt_text += f"\n\nPDF: {os.path.basename(pdf_path)}"
 
@@ -2434,7 +2532,7 @@ class CartScreen(AppScreen):
                     size_hint=(0.85, 0.3)
                 ).open()
                 return
-            app.print_receipt_async(now_dt, items, total, self._print_result)
+            app.print_receipt_async(now_dt, items, total, self._print_result, bayar, kembalian)
 
         btn_print.bind(on_press=do_print)
 
@@ -2460,7 +2558,8 @@ class CartScreen(AppScreen):
         if app.auto_print and app.printer.is_connected():
             app.print_receipt_async(
                 now_dt, items, total,
-                lambda ok, msg: None if ok else self._print_result(ok, msg)
+                lambda ok, msg: None if ok else self._print_result(ok, msg),
+                bayar, kembalian
             )
 
     @staticmethod
@@ -2469,7 +2568,7 @@ class CartScreen(AppScreen):
               content=Label(text=msg, halign='center'),
               size_hint=(0.85, 0.28)).open()
 
-    def generate_pdf_receipt(self, total, items, now_dt):
+    def generate_pdf_receipt(self, total, items, now_dt, bayar=None, kembalian=None):
         if not HAS_REPORTLAB:
             return None
 
@@ -2480,7 +2579,7 @@ class CartScreen(AppScreen):
         os.makedirs(folder, exist_ok=True)
         filename = os.path.join(folder, f"struk_{now_dt.strftime('%Y%m%d_%H%M%S')}.pdf")
 
-        page_height = max(380 + (len(items) * 25), 440)
+        page_height = max(380 + (len(items) * 25), 440) + (30 if bayar is not None else 0)
         c = canvas.Canvas(filename, pagesize=(220, page_height))
 
         # --- LOGO STRUK PDF ---
@@ -2522,8 +2621,18 @@ class CartScreen(AppScreen):
         c.line(15, y + 5, 205, y + 5)
         y -= 10
         c.setFont("Helvetica-Bold", 10)
-        c.drawString(15, y, "TOTAL BAYAR:")
+        c.drawString(15, y, "TOTAL:")
         c.drawRightString(205, y, f"Rp {rupiah(total)}")
+
+        if bayar is not None:
+            y -= 14
+            c.setFont("Helvetica", 9)
+            c.drawString(15, y, "BAYAR:")
+            c.drawRightString(205, y, f"Rp {rupiah(bayar)}")
+            y -= 13
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(15, y, "KEMBALIAN:")
+            c.drawRightString(205, y, f"Rp {rupiah(kembalian or 0)}")
 
         y -= 30
         c.setFont("Helvetica-Oblique", 8)
@@ -2851,7 +2960,94 @@ class ProductEditScreen(AppScreen):
         popup.open()
 
 
+MONTHS_ID = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli',
+             'Agustus', 'September', 'Oktober', 'November', 'Desember']
+MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des']
+REPORT_MAX_PERIODS = 12  # berapa minggu / bulan terakhir yang ditampilkan
+
+
+def parse_transaction_time(raw):
+    """Ubah nilai timestamp transaksi (format apapun dari Firestore) jadi datetime lokal.
+    Mengembalikan None kalau tidak bisa dibaca."""
+    if raw is None or raw == '':
+        return None
+    try:
+        if isinstance(raw, datetime.datetime):
+            dt = raw
+        elif isinstance(raw, (int, float)):
+            return datetime.datetime.fromtimestamp(raw)
+        elif isinstance(raw, str):
+            dt = datetime.datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        else:
+            return None
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt
+    except Exception:
+        return None
+
+
+def build_report_summary(docs):
+    """Hitung ringkasan keseluruhan + rekap per minggu (Senin-Minggu) dan per bulan.
+    Dijalankan di thread background."""
+    omzet, count, items_all = 0, 0, {}
+    weeks, months = {}, {}
+
+    for t in docs:
+        total = t.get('total', 0)
+        omzet += total
+        count += 1
+
+        t_items = {}
+        for item in t.get('items', []):
+            nama = item.get('nama', 'Produk')
+            qty = item.get('qty', 0)
+            items_all[nama] = items_all.get(nama, 0) + qty
+            t_items[nama] = t_items.get(nama, 0) + qty
+
+        dt = parse_transaction_time(t.get('timestamp'))
+        if dt is None:
+            continue
+        d = dt.date()
+        week_start = d - datetime.timedelta(days=d.weekday())  # Senin
+        for bucket, key in ((weeks, week_start), (months, (d.year, d.month))):
+            b = bucket.setdefault(key, {'omzet': 0, 'count': 0, 'items': {}})
+            b['omzet'] += total
+            b['count'] += 1
+            for nama, qty in t_items.items():
+                b['items'][nama] = b['items'].get(nama, 0) + qty
+
+    today = datetime.date.today()
+    this_week = today - datetime.timedelta(days=today.weekday())
+
+    def pack(bucket, label_fn, current_key):
+        rows = []
+        for key in sorted(bucket, reverse=True)[:REPORT_MAX_PERIODS]:
+            b = bucket[key]
+            top = max(b['items'].items(), key=lambda kv: kv[1]) if b['items'] else None
+            rows.append((label_fn(key), b['omzet'], b['count'], sum(b['items'].values()),
+                         top, key == current_key))
+        return rows
+
+    def week_label(ws):
+        we = ws + datetime.timedelta(days=6)
+        return f"{ws.day} {MONTHS_SHORT[ws.month - 1]} - {we.day} {MONTHS_SHORT[we.month - 1]} {we.year}"
+
+    def month_label(key):
+        return f"{MONTHS_ID[key[1] - 1]} {key[0]}"
+
+    return {
+        'omzet': omzet,
+        'count': count,
+        'items': items_all,
+        'weeks': pack(weeks, week_label, this_week),
+        'months': pack(months, month_label, (today.year, today.month)),
+    }
+
+
 class ReportScreen(AppScreen):
+    period = StringProperty('all')  # 'all' | 'week' | 'month'
+
     def confirm_reset_report(self):
         app = App.get_running_app()
         if not fs.is_ready() or not app.user_uid:
@@ -2889,7 +3085,7 @@ class ReportScreen(AppScreen):
             docs = fs.query("transactions", [("users_id", "EQUAL", app.user_uid)])
             deleted = fs.delete_many("transactions", [d['doc_id'] for d in docs])
 
-            app.report_cache = (0, 0, {})  # laporan kosong tampil seketika
+            app.report_cache = build_report_summary([])  # laporan kosong tampil seketika
             app.report_cache_uid = app.user_uid
             app.report_cache_time = time.time()
             app.history_cache = []
@@ -2908,6 +3104,12 @@ class ReportScreen(AppScreen):
 
     _report_sig = None
     _report_loading = False
+
+    def set_period(self, period):
+        if period == self.period:
+            return
+        self.period = period
+        self.load_financial_report()
 
     def _report_message(self, text):
         layout = self.ids.report_content_layout
@@ -2937,16 +3139,7 @@ class ReportScreen(AppScreen):
 
         def work():
             docs = fs.query("transactions", [("users_id", "EQUAL", uid)])
-            total_omzet = 0
-            total_transaksi = 0
-            items_terjual = {}
-            for t in docs:
-                total_omzet += t.get('total', 0)
-                total_transaksi += 1
-                for item in t.get('items', []):
-                    nama = item.get('nama', 'Produk')
-                    items_terjual[nama] = items_terjual.get(nama, 0) + item.get('qty', 0)
-            return (total_omzet, total_transaksi, items_terjual)
+            return build_report_summary(docs)
 
         def done(result, error):
             self._report_loading = False
@@ -2965,15 +3158,57 @@ class ReportScreen(AppScreen):
 
         run_in_thread(work, done)
 
+    def _render_period(self, layout, rows, title, hint):
+        """Kartu rekap per minggu / bulan (terbaru di atas)."""
+        layout.add_widget(Factory.SectionTitle(text=title))
+        layout.add_widget(Factory.MutedLabel(text=hint, size_hint_y=None, height=dp(20)))
+
+        if not rows:
+            layout.add_widget(Factory.MutedLabel(text="Belum ada data penjualan.", halign='center',
+                                                 font_size='13sp', size_hint_y=None, height=dp(80)))
+            return
+
+        for label, omzet, count, pcs, top, is_current in rows:
+            card = Factory.CustomCard(size_hint_y=None, height=dp(122), padding=dp(14), spacing=dp(3))
+
+            head = BoxLayout(size_hint_y=None, height=dp(22))
+            head.add_widget(Factory.LeftLabel(text=label, bold=True, font_size='14sp',
+                                              shorten=True, shorten_from='right'))
+            if is_current:
+                head.add_widget(Factory.RightLabel(text='Berjalan', color=CLR_WARN, font_size='11sp',
+                                                   size_hint_x=None, width=dp(64)))
+            card.add_widget(head)
+
+            card.add_widget(Factory.LeftLabel(text=f"Rp {rupiah(omzet)}", bold=True, font_size='22sp',
+                                              color=CLR_SUCCESS, size_hint_y=None, height=dp(34)))
+            card.add_widget(Factory.MutedLabel(text=f"{count} transaksi  |  {pcs} item terjual",
+                                               size_hint_y=None, height=dp(18)))
+            terlaris = f"Terlaris: {top[0]} ({top[1]} pcs)" if top else "Terlaris: -"
+            card.add_widget(Factory.MutedLabel(text=terlaris, size_hint_y=None, height=dp(18),
+                                               shorten=True, shorten_from='right'))
+            layout.add_widget(card)
+
     def _render_report(self, summary):
-        total_omzet, total_transaksi, items_terjual = summary
-        sig = (total_omzet, total_transaksi, tuple(sorted(items_terjual.items())))
+        total_omzet = summary['omzet']
+        total_transaksi = summary['count']
+        items_terjual = summary['items']
+        sig = (self.period, total_omzet, total_transaksi, tuple(sorted(items_terjual.items())),
+               tuple(summary['weeks']), tuple(summary['months']))
         if sig == self._report_sig:
             return
         self._report_sig = sig
 
         layout = self.ids.report_content_layout
         layout.clear_widgets()
+
+        if self.period == 'week':
+            self._render_period(layout, summary['weeks'], 'Laporan Mingguan',
+                                f"Senin - Minggu, {REPORT_MAX_PERIODS} minggu terakhir")
+            return
+        if self.period == 'month':
+            self._render_period(layout, summary['months'], 'Laporan Bulanan',
+                                f"{REPORT_MAX_PERIODS} bulan terakhir")
+            return
 
         summary_card = Factory.CustomCard(size_hint_y=None, height=dp(128), padding=dp(16), spacing=dp(4))
         summary_card.add_widget(Factory.MutedLabel(text="Total Pendapatan", font_size='13sp',
@@ -3002,27 +3237,13 @@ class ReportScreen(AppScreen):
 
 
 def format_transaction_time(raw):
-    """Ubah nilai timestamp transaksi (format apapun yang dikembalikan Firestore)
-    jadi teks 'dd/mm/yyyy HH:MM' yang enak dibaca. Kalau gagal parse, tampilkan
-    versi ringkas dari nilai aslinya supaya tidak error di layar."""
+    """Ubah nilai timestamp transaksi jadi teks 'dd/mm/yyyy HH:MM' yang enak dibaca.
+    Kalau gagal parse, tampilkan versi ringkas nilai aslinya supaya tidak error di layar."""
     if raw is None or raw == '':
         return '-'
-    if isinstance(raw, datetime.datetime):
-        dt = raw
-    elif isinstance(raw, (int, float)):
-        try:
-            dt = datetime.datetime.fromtimestamp(raw)
-        except Exception:
-            return str(raw)
-    elif isinstance(raw, str):
-        try:
-            dt = datetime.datetime.fromisoformat(raw.replace('Z', '+00:00'))
-            if dt.tzinfo is not None:
-                dt = dt.astimezone()
-        except Exception:
-            return raw.replace('T', ' ')[:16]
-    else:
-        return str(raw)
+    dt = parse_transaction_time(raw)
+    if dt is None:
+        return raw.replace('T', ' ')[:16] if isinstance(raw, str) else str(raw)
     return dt.strftime('%d/%m/%Y %H:%M')
 
 
@@ -3174,29 +3395,18 @@ class HistoryScreen(AppScreen):
         content.add_widget(Factory.LeftLabel(
             text=f"Total: Rp {rupiah(int(t.get('total', 0)))}", bold=True, color=CLR_SUCCESS,
             font_size='16sp', size_hint_y=None, height=dp(30)))
+        if t.get('bayar') is not None:
+            content.add_widget(Factory.MutedLabel(
+                text=f"Dibayar: Rp {rupiah(int(t.get('bayar', 0)))}", size_hint_y=None, height=dp(20)))
+            content.add_widget(Factory.MutedLabel(
+                text=f"Kembalian: Rp {rupiah(int(t.get('kembalian', 0)))}", size_hint_y=None, height=dp(20)))
 
         btn_close = Factory.SecondaryButton(text='Tutup', size_hint_y=None, height=dp(40))
         content.add_widget(btn_close)
 
-        popup = Popup(title='Detail Transaksi', content=content, size_hint=(0.9, 0.7))
+        popup = Popup(title='Detail Transaksi', content=content, size_hint=(0.9, 0.75))
         btn_close.bind(on_press=popup.dismiss)
         popup.open()
-
-
-def normalize_camera_url(raw):
-    """Rapikan URL kamera yang diketik user.
-      '192.168.1.5:8080'         -> 'http://192.168.1.5:8080/video'
-      'http://192.168.1.5:8080'  -> 'http://192.168.1.5:8080/video'
-    URL yang sudah punya path (mis. /shot.jpg atau rtsp://...) dibiarkan apa adanya."""
-    url = (raw or '').strip()
-    if not url:
-        return ''
-    if '://' not in url:
-        url = 'http://' + url
-    parts = urlparse(url)
-    if parts.scheme.lower() in ('http', 'https') and parts.path in ('', '/'):
-        url = urlunparse(parts._replace(path='/video'))
-    return url
 
 
 class CameraError(Exception):
@@ -3205,17 +3415,12 @@ class CameraError(Exception):
 
 class CameraReader(threading.Thread):
     """
-    Membaca frame kamera di THREAD TERPISAH, sehingga UI Kivy tidak membeku
-    walau koneksi ke HP lambat / IP salah.
-
-    - URL http(s) (IP Webcam, DroidCam, dll) dibaca langsung lewat `requests`
-      (stream MJPEG atau snapshot JPEG) -> tidak bergantung pada FFmpeg milik OpenCV
-      dan punya timeout yang jelas.
-    - Sumber lain (indeks kamera 0, rtsp://, ...) memakai cv2.VideoCapture.
-    - Hanya frame TERBARU yang disimpan, jadi gambar tidak "tertinggal" (lag).
+    Membaca frame webcam bawaan (indeks 0) di THREAD TERPISAH supaya UI Kivy tidak
+    membeku. Hanya dipakai di desktop; di Android pemindaian memakai Google Code Scanner.
+    Hanya frame TERBARU yang disimpan, jadi gambar tidak "tertinggal" (lag).
     """
 
-    def __init__(self, source):
+    def __init__(self, source=0):
         super().__init__(daemon=True)
         self.source = source
         self.error = ''
@@ -3224,9 +3429,7 @@ class CameraReader(threading.Thread):
         self._is_new = False
         self._lock = threading.Lock()
         self._stop_evt = threading.Event()
-        self._resp = None
 
-    # --- API untuk thread utama ---------------------------------------------
     def get_frame(self):
         """Kembalikan frame baru (sekali saja) atau None kalau belum ada yang baru."""
         with self._lock:
@@ -3237,23 +3440,13 @@ class CameraReader(threading.Thread):
 
     def stop(self):
         self._stop_evt.set()
-        resp = self._resp
-        if resp is not None:
-            try:
-                resp.close()
-            except Exception:  # noqa: BLE001
-                pass
 
-    # --- thread -----------------------------------------------------------
     def run(self):
         try:
-            if isinstance(self.source, str) and self.source.lower().startswith(('http://', 'https://')):
-                self._run_http()
-            else:
-                self._run_capture()
+            self._run_capture()
         except Exception as e:  # noqa: BLE001
             if not self._stop_evt.is_set():
-                self.error = self._explain(e)
+                self.error = str(e) if isinstance(e, CameraError) else f"{type(e).__name__}: {e}"
                 print("Kamera error:", repr(e))
 
     def _set_frame(self, frame):
@@ -3262,112 +3455,11 @@ class CameraReader(threading.Thread):
             self._is_new = True
         self.got_frame = True
 
-    def _push_jpeg(self, jpg):
-        frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
-        if frame is not None:
-            self._set_frame(frame)
-
-    # --- kamera IP lewat HTTP -------------------------------------------------
-    def _candidates(self):
-        """URL yang dicoba berurutan. Kalau /video gagal (404), coba path lain
-        yang umum dipakai aplikasi IP camera."""
-        parts = urlparse(self.source)
-        urls = [self.source]
-        if parts.path == '/video':
-            for alt in ('/videofeed', '/mjpegfeed', '/shot.jpg'):
-                urls.append(urlunparse(parts._replace(path=alt)))
-        return urls
-
-    def _run_http(self):
-        last_err = None
-        for url in self._candidates():
-            retries = 0
-            while not self._stop_evt.is_set():
-                try:
-                    self._stream_url(url)
-                    return
-                except Exception as e:  # noqa: BLE001
-                    last_err = e
-                    if self._stop_evt.is_set():
-                        return
-                    if self.got_frame and retries < 3:
-                        # sempat jalan lalu putus (WiFi goyang) -> sambung ulang
-                        retries += 1
-                        time.sleep(1)
-                        continue
-                    break
-            if self._stop_evt.is_set():
-                return
-            # HP tidak terjangkau -> percuma mencoba path lain
-            if self.got_frame or isinstance(last_err, requests.exceptions.ConnectionError):
-                break
-        if last_err is not None:
-            raise last_err
-
-    def _stream_url(self, url):
-        session = requests.Session()
-        try:
-            resp = session.get(url, stream=True, timeout=(5, 8))
-            self._resp = resp
-            if resp.status_code == 401:
-                raise CameraError("Kamera meminta username/password.\n"
-                                  "Tulis di URL: http://user:password@IP:PORT/video")
-            if resp.status_code != 200:
-                raise CameraError(f"Kamera menjawab HTTP {resp.status_code}.\n"
-                                  "Periksa alamat/path URL (untuk IP Webcam: /video).")
-            ctype = resp.headers.get('Content-Type', '').lower()
-            if ctype.startswith('image/'):
-                self._poll_snapshot(session, url, resp)
-            elif ctype.startswith('text/'):
-                raise CameraError("Alamat itu membuka halaman web, bukan video.\n"
-                                  "Gunakan alamat video, mis. http://IP:8080/video")
-            else:
-                self._read_mjpeg(resp)
-        finally:
-            try:
-                session.close()
-            except Exception:  # noqa: BLE001
-                pass
-
-    def _read_mjpeg(self, resp):
-        buf = b''
-        for chunk in resp.iter_content(chunk_size=8192):
-            if self._stop_evt.is_set():
-                return
-            if not chunk:
-                continue
-            buf += chunk
-            end = buf.rfind(b'\xff\xd9')          # akhir JPEG (EOI)
-            if end == -1:
-                if len(buf) > 4_000_000:          # jaga-jaga data sampah
-                    buf = b''
-                continue
-            start = buf.rfind(b'\xff\xd8', 0, end)  # awal JPEG (SOI)
-            if start != -1:
-                self._push_jpeg(buf[start:end + 2])  # ambil yang TERBARU saja
-            buf = buf[end + 2:]
-        if self._stop_evt.is_set():
-            return
-        if self.got_frame:
-            raise CameraError("Koneksi ke kamera terputus.")
-        raise CameraError("Alamat itu tidak mengirim video MJPEG.\n"
-                          "Untuk IP Webcam gunakan http://IP:8080/video")
-
-    def _poll_snapshot(self, session, url, resp):
-        while not self._stop_evt.is_set():
-            self._push_jpeg(resp.content)
-            time.sleep(0.03)
-            resp = session.get(url, timeout=(5, 8))
-            self._resp = resp
-            if resp.status_code != 200:
-                raise CameraError(f"Kamera menjawab HTTP {resp.status_code}.")
-
-    # --- sumber lain: webcam / rtsp ------------------------------------------
     def _run_capture(self):
         cap = cv2.VideoCapture(self.source)
         try:
             if not cap.isOpened():
-                raise CameraError(f"Gagal membuka kamera: {self.source}")
+                raise CameraError("Gagal membuka kamera bawaan.\nPastikan kamera tidak dipakai aplikasi lain.")
             try:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:  # noqa: BLE001
@@ -3385,24 +3477,6 @@ class CameraReader(threading.Thread):
                 self._set_frame(frame)
         finally:
             cap.release()
-
-    @staticmethod
-    def _explain(exc):
-        if isinstance(exc, CameraError):
-            return str(exc)
-        rq = requests.exceptions
-        if isinstance(exc, rq.SSLError):
-            return "Koneksi aman (https) gagal.\nCoba gunakan http:// bukan https://"
-        if isinstance(exc, rq.ConnectionError):
-            return ("Tidak bisa terhubung ke kamera.\n"
-                    "Pastikan HP & perangkat ini di WiFi yang sama, aplikasi kamera di HP "
-                    "sudah dijalankan (Start server), serta IP dan port sudah benar.")
-        if isinstance(exc, rq.Timeout):
-            return "Kamera tidak mengirim gambar (timeout).\nCoba mulai ulang aplikasi kamera di HP."
-        if isinstance(exc, (rq.InvalidURL, rq.MissingSchema, rq.InvalidSchema)):
-            return "Format URL kamera tidak valid."
-        return f"{type(exc).__name__}: {exc}"
-
 
 
 # ----------------------------------------------------------------------
@@ -3519,9 +3593,7 @@ class ScannerScreen(AppScreen):
             Clock.schedule_once(lambda dt: self.cancel_scan(), 0)
             return
 
-        app = App.get_running_app()
-        raw = app.ip_camera_url.strip()
-        self._source = normalize_camera_url(raw) if raw else 0
+        self._source = 0  # kamera bawaan
 
         self._active = True
         self._scan_busy = False
@@ -3618,8 +3690,6 @@ class ScannerScreen(AppScreen):
 
     def _fail(self, message):
         self.stop_camera()
-        if self._source:
-            message = f"{message}\n\nURL: {self._source}"
         show_popup('Error Kamera', message, 'error')
         self.cancel_scan()
 
@@ -3691,7 +3761,6 @@ class POSNaufalApp(App):
     user_email = StringProperty('')
     user_uid = StringProperty('')
     kasir_name = StringProperty('Kasir 1')
-    ip_camera_url = StringProperty('')
     hw_scan_enabled = BooleanProperty(True)
     hw_scan_status = StringProperty('Siap memindai otomatis')
     current_screen = StringProperty('login')
@@ -3713,7 +3782,7 @@ class POSNaufalApp(App):
     products_cache = None      # list produk terakhir (atau None)
     products_cache_uid = ''
     products_cache_time = 0.0
-    report_cache = None        # (total_omzet, total_transaksi, {nama: qty})
+    report_cache = None        # dict ringkasan dari build_report_summary()
     report_cache_uid = ''
     report_cache_time = 0.0
     history_cache = None       # list transaksi terakhir (urut terbaru dulu)
@@ -3826,7 +3895,6 @@ class POSNaufalApp(App):
         self.store = JsonStore(os.path.join(self.user_data_dir, 'session.json'))
         fs.configure(FIREBASE_PROJECT_ID, lambda: self.id_token, self.refresh_id_token)
         self.load_printer_settings()
-        self.load_camera_settings()
         self.load_hw_scan_settings()
         self.hw_scanner = HardwareScanner(self.handle_hardware_scan)
         self.hw_scanner.enabled = self.hw_scan_enabled
@@ -3902,22 +3970,6 @@ class POSNaufalApp(App):
         run_in_thread(work, done)
 
     # ------------------------------------------------------------------
-    # KAMERA IP: simpan / muat URL (bertahan setelah app ditutup)
-    # ------------------------------------------------------------------
-    def load_camera_settings(self):
-        try:
-            if self.store.exists('camera'):
-                self.ip_camera_url = self.store.get('camera').get('ip_url', '')
-        except Exception as e:
-            print("Gagal memuat pengaturan kamera:", e)
-
-    def save_camera_settings(self):
-        try:
-            self.store.put('camera', ip_url=self.ip_camera_url)
-        except Exception as e:
-            print("Gagal menyimpan pengaturan kamera:", e)
-
-    # ------------------------------------------------------------------
     # ALAT SCAN BARCODE FISIK: simpan / muat pengaturan, tangani hasil scan
     # ------------------------------------------------------------------
     def load_hw_scan_settings(self):
@@ -3965,9 +4017,10 @@ class POSNaufalApp(App):
     def make_receipt_builder(self):
         return ReceiptBuilder(self.store_name, self.store_address, self.paper_width)
 
-    def print_receipt_async(self, now_dt, items, total, callback=None):
+    def print_receipt_async(self, now_dt, items, total, callback=None, bayar=None, kembalian=None):
         """Cetak struk di background. callback(ok, pesan) dipanggil di thread utama."""
-        data = self.make_receipt_builder().as_escpos(self.kasir_name, now_dt, items, total)
+        data = self.make_receipt_builder().as_escpos(
+            self.kasir_name, now_dt, items, total, bayar, kembalian)
 
         def done(result, err):
             ok, msg = result if err is None else (False, f"Gagal mencetak: {err}")
@@ -4078,4 +4131,4 @@ class POSNaufalApp(App):
 
 
 if __name__ == '__main__':
-    POSNaufalApp().run()    
+    POSNaufalApp().run()
